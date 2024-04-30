@@ -8,11 +8,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
+	"time"
 )
 
 type data struct {
@@ -21,6 +24,7 @@ type data struct {
 }
 
 func main() {
+	start := time.Now()
 
 	pwd, _ := os.Getwd()
 	Unprocessed := pwd + "/Unprocessed-Passwords"
@@ -41,64 +45,144 @@ func main() {
 	}
 
 	wg := sync.WaitGroup{}
-	writerMap := make(chan data)
-	for i, entry := range fileInfos {
-		wg.Add(1)
-		fmt.Printf("goroutine: %v \n file: %v \n ----Started----- \n", i, entry.Name())
-		go ProcessFileWithChan(entry, Index, Processed, i, Unprocessed, &wg, writerMap)
+	channel := make(chan []data, 3)
+	for k, entry := range fileInfos {
+		ReadFile(k, entry, Index, Processed, Unprocessed, &wg, channel)
+		err2 := os.Rename(Unprocessed+"/"+entry.Name(), Processed+"/"+entry.Name())
 
+		if err2 != nil {
+			fmt.Printf("there was an error deleting the file : %v \n", err2)
+		}
 	}
 
 	go func() {
 		wg.Wait()
-		close(writerMap)
+		close(channel)
+		fmt.Printf("Processing ended. Elapsed time: %v \n", time.Since(start)/time.Second)
 	}()
 
-	m := make(map[string]map[string]bool)
+	m := make(map[string][]string)
 
-	for item := range writerMap {
-		fmt.Printf("\n\nchannel output \nkey: %v \nvalue: %v \n", item.key, item.value)
-		m[item.key][item.value] = true
+	for item := range channel {
+		for _, elem := range item {
+
+			//fmt.Printf("key: %v value: %v \n", elem.key, elem.value)
+			m[elem.key] = append(m[elem.key], elem.value)
+		}
 	}
 
 	var wg2 sync.WaitGroup
 
 	for key, value := range m {
-		f, err1 := os.OpenFile(key+"/1.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-
-		if err1 != nil {
-			fmt.Printf("there was an error while creating or accessing the file : %v \n", err)
-		}
-		defer f.Close()
-
 		wg2.Add(1)
-
-		go func(value map[string]bool) {
-			for val := range value {
-				f.WriteString(val)
-			}
+		//fmt.Printf("key: %v value: %v \n", key, value)
+		go func(key string, value []string) {
+			WriteToIndex(key, value)
 			wg2.Done()
-		}(value)
+		}(key, value)
 	}
 
 	wg2.Wait()
+	fmt.Printf("Elapsed Time: %v", time.Since(start)/time.Second)
 }
 
-func ProcessFileWithChan(entry fs.DirEntry, Index string, Processed string, i int, Unprocessed string, wg *sync.WaitGroup,
-	writerMap chan<- data) {
-	defer wg.Done()
-	file, err := os.Open(Unprocessed + "/" + entry.Name())
+func WriteToIndex(key string, value []string) {
 
+	var wg sync.WaitGroup
+
+	if _, err := os.Stat(key); errors.Is(err, os.ErrNotExist) {
+		err := os.Mkdir(key, os.ModePerm)
+		if err != nil {
+			fmt.Printf("some error: %v\n", err)
+		}
+	}
+	f, err1 := os.OpenFile(key+"/1.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+
+	if err1 != nil {
+		fmt.Printf("there was an error while creating or accessing the file : %v \n", err1)
+	}
+	defer f.Close()
+
+	wg.Add(1)
+
+	go func(value []string) {
+		for _, val := range value {
+			f.WriteString(val)
+		}
+		wg.Done()
+	}(value)
+	wg.Wait()
+}
+
+func ReadFile(route int, entry fs.DirEntry, Index string, Processed string, Unprocessed string, wg *sync.WaitGroup, channel chan<- []data) {
+
+	file, err := os.Open(Unprocessed + "/" + entry.Name())
+	//channel1 := make(chan data)
 	if err != nil {
 		fmt.Printf("there was an error during access to a file in the directory : %v \n", err)
 	}
 
-	var m data
-	reader := bufio.NewReader(file)
-	line, err := Readln(reader)
-	a := 0
-	for err == nil {
+	buf := make([]byte, 1024*16)
 
+	offset := 0
+	fileInfo, _ := file.Stat()
+	fileSize := fileInfo.Size()
+
+	for i := 0; i <= int(fileSize)/(1024*16); i++ {
+		wg.Add(1)
+		n, err2 := file.ReadAt(buf, int64(offset))
+
+		if n == 0 {
+			if err2 != nil {
+				fmt.Println(err)
+				break
+			}
+			if err2 == io.EOF {
+				break
+			}
+			return
+		}
+
+		for i := n - 1; i >= 0; i-- {
+
+			if buf[i] == '\n' {
+				n = i
+				break
+			}
+		}
+		val := string(buf[:n])
+
+		go ProcessFileWithChan(i, route, val, Index, Processed, Unprocessed, entry.Name(), wg, channel)
+		offset += n + 1
+	}
+	fmt.Printf("goroutine %v finished \n", route)
+	file.Close()
+
+}
+
+func print(chunks []byte) {
+
+	paragraph := string(chunks)
+	lines := strings.Split(paragraph, "\n")
+	file, _ := os.OpenFile("kayit.txt", os.O_CREATE|os.O_APPEND, 0644)
+
+	for i, line := range lines {
+		file.WriteString(fmt.Sprintf("%vth line: %v \n", i, line))
+	}
+}
+
+func ProcessFileWithChan(selfroute int, route int, paragraph string, Index string, Processed string, Unprocessed string, name string, wg *sync.WaitGroup,
+	channel chan<- []data) {
+	defer wg.Done()
+	var m data // struct with key and value strings. Holds the path of the target file and the line to be written
+	var slice []data
+	lines := strings.Split(paragraph, "\n")
+
+	for _, line := range lines {
+
+		if len(line) == 0 {
+			continue
+		}
 		alphanumeric := regexp.MustCompile("^[a-zA-Z0-9_]*$")
 		isAlphanumeric := alphanumeric.MatchString(string(line[0]))
 		path := Index + "/symbol"
@@ -110,33 +194,14 @@ func ProcessFileWithChan(entry fs.DirEntry, Index string, Processed string, i in
 			path = Index + "/" + string(line[0])
 		}
 
-		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			err := os.Mkdir(path, os.ModePerm)
-			if err != nil {
-				log.Println(err)
-			}
-		}
-
 		m.key = path
 		m.value = line + " | " + hex.EncodeToString(md5hash[:]) + " | " + hex.EncodeToString(sha1hash[:]) +
-			" | " + hex.EncodeToString(sha256hash[:]) + " | " + entry.Name() + "\n"
-		fmt.Printf("key: %v value: %v \n", m.key, m.value)
-		writerMap <- m
+			" | " + hex.EncodeToString(sha256hash[:]) + " | " + name + "\n"
 
-		line, err = Readln(reader)
-		//fmt.Printf("line number: %v \n password: %v \n", a, line)
-		a++
-
+		slice = append(slice, m)
 	}
-
-	fmt.Printf("goroutine: %v \n file: %v \n ----Done----- \n", i, entry.Name())
-
-	file.Close()
-	err2 := os.Rename(Unprocessed+"/"+entry.Name(), Processed+"/"+entry.Name())
-
-	if err2 != nil {
-		fmt.Printf("there was an error deleting the file : %v \n", err2)
-	}
+	fmt.Printf("goroutine %v's child %v finished \n", route, selfroute)
+	channel <- slice
 }
 
 func Readln(r *bufio.Reader) (string, error) {

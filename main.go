@@ -2,71 +2,66 @@ package main
 
 import (
 	code "1306170097/fileorg/project/Code"
+	"bufio"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 )
 
+// Color escape codes for CLI
+var Reset = "\033[0m"
+var Red = "\033[31m"
+var Green = "\033[32m"
+var Yellow = "\033[33m"
+var Blue = "\033[34m"
+var Magenta = "\033[35m"
+var Cyan = "\033[36m"
+var Gray = "\033[37m"
+var White = "\033[97m"
+
 func main() {
-	start := time.Now()
-	pwd, _ := os.Getwd()
-	Unprocessed := pwd + "/Unprocessed-Passwords"
-	Processed := pwd + "/Processed"
-	Index := pwd + "/Index"
-	files, err := os.Open(Unprocessed)
 
-	if err != nil {
-		fmt.Printf("there was an error during opening of the Unprocessed-Passwords directory : %v \n", err)
-	}
+	pwd, _ := os.Getwd() //project working directory
 
-	defer files.Close()
+	selection := "n"
+	var searchTerm string
+	scanner := bufio.NewScanner(os.Stdin)
 
-	fileInfos, err := files.ReadDir(-1)
-
-	if err != nil {
-		fmt.Printf("there was an error during access to the directory : %v \n", err)
-	}
-
-	wg := sync.WaitGroup{}
-	channel := make(chan []code.Data, 3)
-
-	for k, entry := range fileInfos {
-		code.ReadFile(k, entry, Index, Processed, Unprocessed, &wg, channel)
-		err2 := os.Rename(Unprocessed+"/"+entry.Name(), Processed+"/"+entry.Name())
-
-		if err2 != nil {
-			fmt.Printf("there was an error deleting the file : %v \n", err2)
+	//CLI menu
+	for {
+		if selection == "n" {
+			fmt.Print("enter " + Yellow + "p" + Reset + " to process files, " +
+				Yellow + "s" + Reset + " to search and " +
+				Yellow + "e" + Reset + " to exit: ")
+			scanner.Scan()
+			selection = scanner.Text()
+			fmt.Println()
+		} else if selection == "p" {
+			start := time.Now()
+			code.Process(pwd)
+			t := time.Since(start)
+			sec := int(t / time.Second)
+			mili := int(t/time.Millisecond) - sec*1000
+			fmt.Printf(Magenta+"Total time: "+Cyan+"%v seconds %v milliseconds \n"+Reset, sec, mili)
+			selection = "n"
+			continue
+		} else if selection == "s" {
+			fmt.Print(Green + "enter the password to be searched: " + Reset)
+			scanner.Scan()
+			searchTerm = scanner.Text()
+			searchTime := time.Now()
+			code.Search(searchTerm, pwd)
+			t := time.Since(searchTime)
+			sec := int(t / time.Second)
+			mili := int(t/time.Millisecond) - sec*1000
+			fmt.Printf(Magenta+"Total search time:"+Cyan+" %v seconds %v milliseconds \n"+Reset, sec, mili)
+			selection = "n"
+			fmt.Println()
+		} else if selection == "e" {
+			break
+		} else {
+			selection = "n"
+			continue
 		}
 	}
-
-	go func() {
-		wg.Wait()
-		close(channel)
-		fmt.Printf("Processing ended. Elapsed time: %v \n", time.Since(start)/time.Second)
-	}()
-
-	m := make(map[string][]string)
-
-	for item := range channel {
-		for _, elem := range item {
-
-			//fmt.Printf("key: %v value: %v \n", elem.key, elem.value)
-			m[elem.Key] = append(m[elem.Key], elem.Value)
-		}
-	}
-
-	var wg2 sync.WaitGroup
-
-	for key, value := range m {
-		wg2.Add(1)
-		//fmt.Printf("key: %v value: %v \n", key, value)
-		go func(key string, value []string) {
-			code.WriteToIndex(key, value)
-			wg2.Done()
-		}(key, value)
-	}
-
-	wg2.Wait()
-	fmt.Printf("Elapsed Time: %v", time.Since(start)/time.Second)
 }
